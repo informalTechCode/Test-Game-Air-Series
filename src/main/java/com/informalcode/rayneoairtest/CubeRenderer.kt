@@ -57,6 +57,9 @@ class CubeRenderer : GLSurfaceView.Renderer {
         var x: Float,
         var y: Float,
         var z: Float,
+        var vx: Float,
+        var vy: Float,
+        var vz: Float,
         val radius: Float
     )
 
@@ -98,6 +101,34 @@ class CubeRenderer : GLSurfaceView.Renderer {
     private val indexBuffer: ShortBuffer =
         ByteBuffer.allocateDirect(indices.size * 2).order(ByteOrder.nativeOrder()).asShortBuffer().apply {
             put(indices)
+            position(0)
+        }
+    private val octaVertices = floatArrayOf(
+        0f, 1f, 0f,
+        -1f, 0f, 0f,
+        0f, 0f, 1f,
+        1f, 0f, 0f,
+        0f, 0f, -1f,
+        0f, -1f, 0f
+    )
+    private val octaIndices = shortArrayOf(
+        0, 1, 2,
+        0, 2, 3,
+        0, 3, 4,
+        0, 4, 1,
+        5, 2, 1,
+        5, 3, 2,
+        5, 4, 3,
+        5, 1, 4
+    )
+    private val octaVertexBuffer: FloatBuffer =
+        ByteBuffer.allocateDirect(octaVertices.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
+            put(octaVertices)
+            position(0)
+        }
+    private val octaIndexBuffer: ShortBuffer =
+        ByteBuffer.allocateDirect(octaIndices.size * 2).order(ByteOrder.nativeOrder()).asShortBuffer().apply {
+            put(octaIndices)
             position(0)
         }
     private val spriteVertices = floatArrayOf(
@@ -166,10 +197,6 @@ class CubeRenderer : GLSurfaceView.Renderer {
     private var gameOverSent = false
     private var lastFrameNs = 0L
     private var aspectRatio = 1f
-    private var showGoldArrow = false
-    private var arrowPosX = 0f
-    private var arrowPosY = 0f
-    private var arrowAngleDeg = 0f
     private var shipHeadingDeg = 0f
     private var prevForwardInitialized = false
     private val prevForward = FloatArray(3)
@@ -323,9 +350,7 @@ class CubeRenderer : GLSurfaceView.Renderer {
 
         if (alive) {
             updateGame(dtSec, smoothedQRel)
-            updateGoldArrow(smoothedQRel)
         } else {
-            showGoldArrow = false
             shipHeadingDeg = 0f
         }
 
@@ -333,7 +358,6 @@ class CubeRenderer : GLSurfaceView.Renderer {
         renderGoldDots()
         renderRocks()
         renderShip()
-        renderGoldArrow()
         renderLasers()
 
         val level = 1 + (elapsedSec / LEVEL_DURATION_SEC).toInt()
@@ -405,7 +429,6 @@ class CubeRenderer : GLSurfaceView.Renderer {
         loadIconTexture(ICON_GOLD, "\uD83D\uDFE1", Color.argb(255, 255, 230, 120))
         loadIconTexture(ICON_DOT, "•", Color.argb(255, 255, 236, 160))
         loadIconTexture(ICON_BOMB, "🪨", Color.WHITE)
-        loadIconTexture(ICON_ARROW, "➣", Color.argb(255, 255, 240, 120))
         loadIconTexture(ICON_LASER, "✦", Color.argb(255, 140, 255, 180))
         loadIconTexture(ICON_STAR, "✦", Color.argb(255, 220, 235, 255))
     }
@@ -435,7 +458,8 @@ class CubeRenderer : GLSurfaceView.Renderer {
     private fun updateGame(dtSec: Float, headQRel: FloatArray) {
         elapsedSec += dtSec
         updateShipTurn(headQRel, dtSec)
-        processPendingShots(headQRel)
+        updateShipWorldTransform(headQRel)
+        processPendingShots()
 
         val difficulty = 1f + elapsedSec / LEVEL_DURATION_SEC
         val maxRocks = (12 + (difficulty * 3f).toInt()).coerceAtMost(34)
@@ -456,40 +480,41 @@ class CubeRenderer : GLSurfaceView.Renderer {
         }
         fillGoldDots()
 
-        val dirCamera = floatArrayOf(shipAimX * SHIP_AIM_LATERAL_GAIN, shipAimY * SHIP_AIM_LATERAL_GAIN, -1f)
-        normalizeVec3InPlace(dirCamera)
-        val shipPosWorld = rotateVectorByQuat(headQRel, floatArrayOf(shipOffsetX, shipOffsetY, -SHIP_DRAW_DISTANCE))
-        val dirWorld = rotateVectorByQuat(headQRel, dirCamera)
-        shipWorldPos[0] = shipPosWorld[0]
-        shipWorldPos[1] = shipPosWorld[1]
-        shipWorldPos[2] = shipPosWorld[2]
-        shipWorldDir[0] = dirWorld[0]
-        shipWorldDir[1] = dirWorld[1]
-        shipWorldDir[2] = dirWorld[2]
-
         val iterator = rocks.iterator()
         while (iterator.hasNext()) {
             val rock = iterator.next()
+            val speed = sqrt(rock.vx * rock.vx + rock.vy * rock.vy + rock.vz * rock.vz).coerceAtLeast(1e-4f)
             rock.x += rock.vx * dtSec
             rock.y += rock.vy * dtSec
             rock.z += rock.vz * dtSec
+            constrainPointToShell(rock)
+            val tangentVelocity = tangentizeDirectionAtPoint(
+                direction = floatArrayOf(rock.vx, rock.vy, rock.vz),
+                pointX = rock.x,
+                pointY = rock.y,
+                pointZ = rock.z
+            )
+            rock.vx = tangentVelocity[0] * speed
+            rock.vy = tangentVelocity[1] * speed
+            rock.vz = tangentVelocity[2] * speed
 
-            val toCenter = sqrt(rock.x * rock.x + rock.y * rock.y + rock.z * rock.z)
-            if (toCenter > ROCK_DESPAWN_DISTANCE) {
+            val dxToShip = rock.x - shipWorldPos[0]
+            val dyToShip = rock.y - shipWorldPos[1]
+            val dzToShip = rock.z - shipWorldPos[2]
+            if (dxToShip * dxToShip + dyToShip * dyToShip + dzToShip * dzToShip >
+                ROCK_DESPAWN_DISTANCE * ROCK_DESPAWN_DISTANCE
+            ) {
                 iterator.remove()
                 continue
             }
-
-            val dxToShip = rock.x - shipPosWorld[0]
-            val dyToShip = rock.y - shipPosWorld[1]
-            val dzToShip = rock.z - shipPosWorld[2]
-            val collisionDistance = if (rock.isBomb) {
-                rock.radius * BOMB_COLLISION_RADIUS_MULTIPLIER +
-                    SHIP_COLLISION_RADIUS * ROCK_SHIP_COLLISION_RADIUS_MULTIPLIER
+            val shipTouchRadius = SHIP_RENDER_SCALE * SPRITE_HALF_EXTENT * SHIP_TOUCH_TIGHTNESS
+            val rockScale = if (rock.isBomb) {
+                rock.radius * BOMB_RENDER_SCALE
             } else {
-                rock.radius * GOLD_COLLISION_RADIUS_MULTIPLIER +
-                    SHIP_COLLISION_RADIUS * GOLD_SHIP_COLLISION_RADIUS_MULTIPLIER
+                rock.radius * GOLD_RENDER_SCALE
             }
+            val rockTouchRadius = rockScale * SPRITE_HALF_EXTENT * OBJECT_TOUCH_TIGHTNESS
+            val collisionDistance = shipTouchRadius + rockTouchRadius
             if (dxToShip * dxToShip + dyToShip * dyToShip + dzToShip * dzToShip <=
                 collisionDistance * collisionDistance
             ) {
@@ -508,12 +533,33 @@ class CubeRenderer : GLSurfaceView.Renderer {
         val dotIterator = goldDots.iterator()
         while (dotIterator.hasNext()) {
             val dot = dotIterator.next()
-            val dxToShip = dot.x - shipPosWorld[0]
-            val dyToShip = dot.y - shipPosWorld[1]
-            val dzToShip = dot.z - shipPosWorld[2]
-            val collectDistance =
-                dot.radius * GOLD_DOT_COLLISION_RADIUS_MULTIPLIER +
-                    SHIP_COLLISION_RADIUS * GOLD_DOT_SHIP_COLLISION_RADIUS_MULTIPLIER
+            val speed = sqrt(dot.vx * dot.vx + dot.vy * dot.vy + dot.vz * dot.vz).coerceAtLeast(1e-4f)
+            dot.x += dot.vx * dtSec
+            dot.y += dot.vy * dtSec
+            dot.z += dot.vz * dtSec
+            constrainPointToShell(dot)
+            val tangentVelocity = tangentizeDirectionAtPoint(
+                direction = floatArrayOf(dot.vx, dot.vy, dot.vz),
+                pointX = dot.x,
+                pointY = dot.y,
+                pointZ = dot.z
+            )
+            dot.vx = tangentVelocity[0] * speed
+            dot.vy = tangentVelocity[1] * speed
+            dot.vz = tangentVelocity[2] * speed
+
+            val dxToShip = dot.x - shipWorldPos[0]
+            val dyToShip = dot.y - shipWorldPos[1]
+            val dzToShip = dot.z - shipWorldPos[2]
+            if (dxToShip * dxToShip + dyToShip * dyToShip + dzToShip * dzToShip >
+                DOT_DESPAWN_DISTANCE * DOT_DESPAWN_DISTANCE
+            ) {
+                dotIterator.remove()
+                continue
+            }
+            val shipTouchRadius = SHIP_RENDER_SCALE * SPRITE_HALF_EXTENT * SHIP_TOUCH_TIGHTNESS
+            val dotTouchRadius = dot.radius * GOLD_DOT_RENDER_SCALE * SPRITE_HALF_EXTENT * OBJECT_TOUCH_TIGHTNESS
+            val collectDistance = shipTouchRadius + dotTouchRadius
             if (dxToShip * dxToShip + dyToShip * dyToShip + dzToShip * dzToShip <=
                 collectDistance * collectDistance
             ) {
@@ -523,6 +569,19 @@ class CubeRenderer : GLSurfaceView.Renderer {
         }
 
         updateLasers(dtSec, headQRel)
+    }
+
+    private fun updateShipWorldTransform(headQRel: FloatArray) {
+        val dirCamera = floatArrayOf(shipAimX * SHIP_AIM_LATERAL_GAIN, shipAimY * SHIP_AIM_LATERAL_GAIN, -1f)
+        normalizeVec3InPlace(dirCamera)
+        val shipPos = rotateVectorByQuat(headQRel, floatArrayOf(shipOffsetX, shipOffsetY, -SHIP_DRAW_DISTANCE))
+        val shipDir = rotateVectorByQuat(headQRel, dirCamera)
+        shipWorldPos[0] = shipPos[0]
+        shipWorldPos[1] = shipPos[1]
+        shipWorldPos[2] = shipPos[2]
+        shipWorldDir[0] = shipDir[0]
+        shipWorldDir[1] = shipDir[1]
+        shipWorldDir[2] = shipDir[2]
     }
 
     private fun updateShipTurn(headQRel: FloatArray, dtSec: Float) {
@@ -569,27 +628,40 @@ class CubeRenderer : GLSurfaceView.Renderer {
         shipHeadingDeg = (atan2(shipAimY, shipAimX) * RAD_TO_DEG)
     }
 
-    private fun processPendingShots(headQRel: FloatArray) {
+    private fun processPendingShots() {
         if (pendingShots <= 0) {
             return
         }
         val shots = pendingShots
         pendingShots = 0
         repeat(shots) {
-            val dirCamera = floatArrayOf(shipAimX * SHIP_AIM_LATERAL_GAIN, shipAimY * SHIP_AIM_LATERAL_GAIN, -1f)
-            normalizeVec3InPlace(dirCamera)
-            val forward = rotateVectorByQuat(headQRel, dirCamera)
-            val shipPos = rotateVectorByQuat(headQRel, floatArrayOf(shipOffsetX, shipOffsetY, -SHIP_DRAW_DISTANCE))
+            val forward = tangentizeDirectionAtPoint(
+                direction = shipWorldDir,
+                pointX = shipWorldPos[0],
+                pointY = shipWorldPos[1],
+                pointZ = shipWorldPos[2]
+            )
             val muzzle = 0.38f
+            val laser = Laser(
+                x = shipWorldPos[0] + forward[0] * muzzle,
+                y = shipWorldPos[1] + forward[1] * muzzle,
+                z = shipWorldPos[2] + forward[2] * muzzle,
+                vx = forward[0] * LASER_SPEED,
+                vy = forward[1] * LASER_SPEED,
+                vz = forward[2] * LASER_SPEED
+            )
+            constrainPointToShell(laser)
+            val tangentVelocity = tangentizeDirectionAtPoint(
+                direction = floatArrayOf(laser.vx, laser.vy, laser.vz),
+                pointX = laser.x,
+                pointY = laser.y,
+                pointZ = laser.z
+            )
+            laser.vx = tangentVelocity[0] * LASER_SPEED
+            laser.vy = tangentVelocity[1] * LASER_SPEED
+            laser.vz = tangentVelocity[2] * LASER_SPEED
             lasers.add(
-                Laser(
-                    x = shipPos[0] + forward[0] * muzzle,
-                    y = shipPos[1] + forward[1] * muzzle,
-                    z = shipPos[2] + forward[2] * muzzle,
-                    vx = forward[0] * LASER_SPEED,
-                    vy = forward[1] * LASER_SPEED,
-                    vz = forward[2] * LASER_SPEED
-                )
+                laser
             )
             if (lasers.size > MAX_LASERS) {
                 lasers.removeAt(0)
@@ -601,9 +673,20 @@ class CubeRenderer : GLSurfaceView.Renderer {
         val laserIter = lasers.iterator()
         while (laserIter.hasNext()) {
             val laser = laserIter.next()
+            val speed = sqrt(laser.vx * laser.vx + laser.vy * laser.vy + laser.vz * laser.vz).coerceAtLeast(1e-4f)
             laser.x += laser.vx * dtSec
             laser.y += laser.vy * dtSec
             laser.z += laser.vz * dtSec
+            constrainPointToShell(laser)
+            val tangentVelocity = tangentizeDirectionAtPoint(
+                direction = floatArrayOf(laser.vx, laser.vy, laser.vz),
+                pointX = laser.x,
+                pointY = laser.y,
+                pointZ = laser.z
+            )
+            laser.vx = tangentVelocity[0] * speed
+            laser.vy = tangentVelocity[1] * speed
+            laser.vz = tangentVelocity[2] * speed
 
             if (isLaserOffScreen(laser, headQRel)) {
                 laserIter.remove()
@@ -650,52 +733,6 @@ class CubeRenderer : GLSurfaceView.Renderer {
             abs(ny) > tanHalfFovY * LASER_OFFSCREEN_MARGIN
     }
 
-    private fun updateGoldArrow(headQRel: FloatArray) {
-        val gold = rocks.firstOrNull { it.isBigGold } ?: run {
-            showGoldArrow = false
-            return
-        }
-        val cam = rotateVectorByQuat(conjugateQuat(headQRel), floatArrayOf(gold.x, gold.y, gold.z))
-        val x = cam[0]
-        val y = cam[1]
-        val z = cam[2]
-        val tanHalfFovY = tan(Math.toRadians((FOV_Y_DEG * 0.5f).toDouble())).toFloat()
-        val tanHalfFovX = tanHalfFovY * aspectRatio
-        val inFront = z < -0.2f
-        val nx = if (-z > 1e-4f) x / (-z) else 0f
-        val ny = if (-z > 1e-4f) y / (-z) else 0f
-        val onScreen = inFront &&
-            abs(nx) <= tanHalfFovX * ARROW_SCREEN_MARGIN &&
-            abs(ny) <= tanHalfFovY * ARROW_SCREEN_MARGIN
-        if (onScreen) {
-            showGoldArrow = false
-            return
-        }
-
-        var dirX = x
-        var dirY = y
-        if (!inFront) {
-            dirX = -dirX
-            dirY = -dirY
-        }
-        var norm = sqrt(dirX * dirX + dirY * dirY)
-        if (norm < 1e-3f) {
-            dirX = 0f
-            dirY = 1f
-            norm = 1f
-        }
-        dirX /= norm
-        dirY /= norm
-
-        val zPlane = -SHIP_DRAW_DISTANCE
-        val halfPlaneY = -zPlane * tanHalfFovY
-        val halfPlaneX = halfPlaneY * aspectRatio
-        arrowPosX = dirX * halfPlaneX * ARROW_EDGE_FACTOR
-        arrowPosY = dirY * halfPlaneY * ARROW_EDGE_FACTOR
-        arrowAngleDeg = (atan2(dirY, dirX) * RAD_TO_DEG)
-        showGoldArrow = true
-    }
-
     private fun renderStars() {
         for (star in stars) {
             Matrix.setIdentityM(model, 0)
@@ -709,6 +746,9 @@ class CubeRenderer : GLSurfaceView.Renderer {
         for (rock in rocks) {
             Matrix.setIdentityM(model, 0)
             Matrix.translateM(model, 0, rock.x, rock.y, rock.z)
+            val spinPhase = (rock.x * 2.3f + rock.y * 1.7f + rock.z * 1.1f) * ROCK_SPIN_PHASE_SCALE
+            Matrix.rotateM(model, 0, elapsedSec * ROCK_SPIN_SPEED_DEG + spinPhase, 0f, 1f, 0f)
+            Matrix.rotateM(model, 0, elapsedSec * ROCK_TUMBLE_SPEED_DEG + spinPhase * 0.5f, 1f, 0f, 0f)
             val scale = when {
                 rock.isBomb -> rock.radius * BOMB_RENDER_SCALE
                 rock.isBigGold -> rock.radius * BIG_GOLD_RENDER_SCALE
@@ -716,11 +756,11 @@ class CubeRenderer : GLSurfaceView.Renderer {
             }
             Matrix.scaleM(model, 0, scale, scale, scale)
             if (rock.isBomb) {
-                drawSprite(view, ICON_BOMB)
+                drawOctahedron(view, 0.42f, 0.42f, 0.45f, 1f)
             } else if (rock.isBigGold) {
-                drawSprite(view, ICON_BIG_GOLD)
+                drawOctahedron(view, 1f, 0.88f, 0.26f, 1f)
             } else {
-                drawSprite(view, ICON_GOLD)
+                drawOctahedron(view, 1f, 0.80f, 0.20f, 1f)
             }
         }
     }
@@ -729,9 +769,12 @@ class CubeRenderer : GLSurfaceView.Renderer {
         for (dot in goldDots) {
             Matrix.setIdentityM(model, 0)
             Matrix.translateM(model, 0, dot.x, dot.y, dot.z)
+            val spinPhase = (dot.x * 3.1f + dot.y * 2.2f + dot.z * 1.4f) * ROCK_SPIN_PHASE_SCALE
+            Matrix.rotateM(model, 0, elapsedSec * DOT_SPIN_SPEED_DEG + spinPhase, 0f, 1f, 0f)
+            Matrix.rotateM(model, 0, elapsedSec * DOT_TUMBLE_SPEED_DEG + spinPhase * 0.6f, 1f, 0f, 0f)
             val scale = dot.radius * GOLD_DOT_RENDER_SCALE
             Matrix.scaleM(model, 0, scale, scale, scale)
-            drawSprite(view, ICON_DOT)
+            drawOctahedron(view, 1f, 0.94f, 0.35f, 1f)
         }
     }
 
@@ -772,19 +815,6 @@ class CubeRenderer : GLSurfaceView.Renderer {
         drawSprite(null, ICON_SHIP)
     }
 
-    private fun renderGoldArrow() {
-        if (!showGoldArrow) {
-            return
-        }
-        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
-        Matrix.setIdentityM(model, 0)
-        Matrix.translateM(model, 0, arrowPosX, arrowPosY, -SHIP_DRAW_DISTANCE)
-        Matrix.rotateM(model, 0, arrowAngleDeg, 0f, 0f, 1f)
-        Matrix.scaleM(model, 0, 0.28f, 0.28f, 0.28f)
-        drawSprite(null, ICON_ARROW)
-        GLES20.glEnable(GLES20.GL_DEPTH_TEST)
-    }
-
     private fun renderLasers() {
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
         for (laser in lasers) {
@@ -804,6 +834,38 @@ class CubeRenderer : GLSurfaceView.Renderer {
             drawSprite(view, ICON_LASER)
         }
         GLES20.glEnable(GLES20.GL_DEPTH_TEST)
+    }
+
+    private fun drawCube(viewMatrix: FloatArray, r: Float, g: Float, b: Float, a: Float) {
+        drawMesh(viewMatrix, vertexBuffer, indexBuffer, indices.size, r, g, b, a)
+    }
+
+    private fun drawOctahedron(viewMatrix: FloatArray, r: Float, g: Float, b: Float, a: Float) {
+        drawMesh(viewMatrix, octaVertexBuffer, octaIndexBuffer, octaIndices.size, r, g, b, a)
+    }
+
+    private fun drawMesh(
+        viewMatrix: FloatArray,
+        vertices: FloatBuffer,
+        meshIndices: ShortBuffer,
+        indexCount: Int,
+        r: Float,
+        g: Float,
+        b: Float,
+        a: Float
+    ) {
+        Matrix.multiplyMM(viewModel, 0, viewMatrix, 0, model, 0)
+        Matrix.multiplyMM(mvp, 0, projection, 0, viewModel, 0)
+
+        GLES20.glUseProgram(program)
+        GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvp, 0)
+        GLES20.glUniform4f(colorHandle, r, g, b, a)
+        vertices.position(0)
+        meshIndices.position(0)
+        GLES20.glEnableVertexAttribArray(posHandle)
+        GLES20.glVertexAttribPointer(posHandle, 3, GLES20.GL_FLOAT, false, 3 * 4, vertices)
+        GLES20.glDrawElements(GLES20.GL_TRIANGLES, indexCount, GLES20.GL_UNSIGNED_SHORT, meshIndices)
+        GLES20.glDisableVertexAttribArray(posHandle)
     }
 
     private fun drawSprite(viewMatrix: FloatArray?, iconIndex: Int) {
@@ -830,21 +892,34 @@ class CubeRenderer : GLSurfaceView.Renderer {
     }
 
     private fun createRock(difficulty: Float, forceGold: Boolean): Rock {
-        val direction = randomUnitVector()
-        val spawnDistance = randomRange(OBJECT_MIN_SPAWN_DISTANCE, OBJECT_MAX_SPAWN_DISTANCE)
-        val speed = randomRange(0.05f, 0.16f + 0.02f * difficulty)
-        val velocityDir = randomUnitVector()
         val bombChance = (0.35f + 0.03f * difficulty).coerceAtMost(0.72f)
         val isBomb = if (forceGold) false else random.nextFloat() < bombChance
         val radius = if (isBomb) {
-            randomRange(0.32f, 0.62f)
+            randomRange(0.22f, 0.44f)
         } else {
-            randomRange(0.22f, 0.42f)
+            randomRange(0.15f, 0.30f)
         }
+        val spawnPos = findReachableSpawn(
+            minDistance = OBJECT_MIN_SPAWN_DISTANCE,
+            maxDistance = OBJECT_MAX_SPAWN_DISTANCE,
+            radius = radius,
+            maxConeDegrees = OBJECT_SPAWN_CONE_DEGREES
+        )
+        val speed = if (isBomb) {
+            randomRange(OBJECT_APPROACH_SPEED_MIN, OBJECT_APPROACH_SPEED_MAX + 0.008f * difficulty)
+        } else {
+            randomRange(GOLD_APPROACH_SPEED_MIN, GOLD_APPROACH_SPEED_MAX + 0.008f * difficulty)
+        }
+        val velocityDir = approachShipDirection(
+            fromX = spawnPos[0],
+            fromY = spawnPos[1],
+            fromZ = spawnPos[2],
+            coneDegrees = OBJECT_APPROACH_CONE_DEGREES
+        )
         return Rock(
-            x = direction[0] * spawnDistance,
-            y = direction[1] * spawnDistance,
-            z = direction[2] * spawnDistance,
+            x = spawnPos[0],
+            y = spawnPos[1],
+            z = spawnPos[2],
             vx = velocityDir[0] * speed,
             vy = velocityDir[1] * speed,
             vz = velocityDir[2] * speed,
@@ -856,17 +931,68 @@ class CubeRenderer : GLSurfaceView.Renderer {
 
     private fun fillGoldDots() {
         while (goldDots.size < MAX_GOLD_DOTS) {
-            val direction = randomUnitVector()
-            val dist = randomRange(DOT_MIN_SPAWN_DISTANCE, DOT_MAX_SPAWN_DISTANCE)
+            val radius = randomRange(DOT_MIN_RADIUS, DOT_MAX_RADIUS)
+            val spawnPos = findReachableSpawn(
+                minDistance = DOT_MIN_SPAWN_DISTANCE,
+                maxDistance = DOT_MAX_SPAWN_DISTANCE,
+                radius = radius,
+                maxConeDegrees = DOT_SPAWN_CONE_DEGREES
+            )
+            val speed = randomRange(DOT_APPROACH_SPEED_MIN, DOT_APPROACH_SPEED_MAX)
+            val velocityDir = approachShipDirection(
+                fromX = spawnPos[0],
+                fromY = spawnPos[1],
+                fromZ = spawnPos[2],
+                coneDegrees = DOT_APPROACH_CONE_DEGREES
+            )
             goldDots.add(
                 GoldDot(
-                    x = direction[0] * dist,
-                    y = direction[1] * dist,
-                    z = direction[2] * dist,
-                    radius = randomRange(DOT_MIN_RADIUS, DOT_MAX_RADIUS)
+                    x = spawnPos[0],
+                    y = spawnPos[1],
+                    z = spawnPos[2],
+                    vx = velocityDir[0] * speed,
+                    vy = velocityDir[1] * speed,
+                    vz = velocityDir[2] * speed,
+                    radius = radius
                 )
             )
         }
+    }
+
+    private fun findReachableSpawn(
+        minDistance: Float,
+        maxDistance: Float,
+        radius: Float,
+        maxConeDegrees: Float
+    ): FloatArray {
+        @Suppress("UNUSED_VARIABLE")
+        val ignoredLegacyParams = minDistance + maxDistance + radius + maxConeDegrees
+        repeat(SPAWN_MAX_ATTEMPTS) {
+            val direction = randomUnitVector()
+            val x = direction[0] * SHIP_DRAW_DISTANCE
+            val y = direction[1] * SHIP_DRAW_DISTANCE
+            val z = direction[2] * SHIP_DRAW_DISTANCE
+            val dx = x - shipWorldPos[0]
+            val dy = y - shipWorldPos[1]
+            val dz = z - shipWorldPos[2]
+            if (dx * dx + dy * dy + dz * dz < MIN_SPAWN_DISTANCE_FROM_SHIP * MIN_SPAWN_DISTANCE_FROM_SHIP) {
+                return@repeat
+            }
+            return floatArrayOf(x, y, z)
+        }
+        val fallback = randomUnitVector()
+        return floatArrayOf(
+            fallback[0] * SHIP_DRAW_DISTANCE,
+            fallback[1] * SHIP_DRAW_DISTANCE,
+            fallback[2] * SHIP_DRAW_DISTANCE
+        )
+    }
+
+    private fun approachShipDirection(fromX: Float, fromY: Float, fromZ: Float, coneDegrees: Float): FloatArray {
+        @Suppress("UNUSED_PARAMETER")
+        val ignoredConeDegrees = coneDegrees
+        val randomDirection = randomUnitVector()
+        return tangentizeDirectionAtPoint(randomDirection, fromX, fromY, fromZ)
     }
 
     private fun randomUnitVector(): FloatArray {
@@ -893,6 +1019,95 @@ class CubeRenderer : GLSurfaceView.Renderer {
         return floatArrayOf(rotated[1], rotated[2], rotated[3])
     }
 
+    private fun directionOnShellTowardTarget(
+        fromX: Float,
+        fromY: Float,
+        fromZ: Float,
+        targetX: Float,
+        targetY: Float,
+        targetZ: Float
+    ): FloatArray {
+        val normal = floatArrayOf(fromX, fromY, fromZ)
+        normalizeVec3InPlace(normal)
+        var tx = targetX - fromX
+        var ty = targetY - fromY
+        var tz = targetZ - fromZ
+        val radialComponent = tx * normal[0] + ty * normal[1] + tz * normal[2]
+        tx -= normal[0] * radialComponent
+        ty -= normal[1] * radialComponent
+        tz -= normal[2] * radialComponent
+        val n = sqrt(tx * tx + ty * ty + tz * tz)
+        if (n < 1e-4f) {
+            return fallbackTangent(normal)
+        }
+        return floatArrayOf(tx / n, ty / n, tz / n)
+    }
+
+    private fun tangentizeDirectionAtPoint(direction: FloatArray, pointX: Float, pointY: Float, pointZ: Float): FloatArray {
+        val normal = floatArrayOf(pointX, pointY, pointZ)
+        normalizeVec3InPlace(normal)
+        var tx = direction[0]
+        var ty = direction[1]
+        var tz = direction[2]
+        val radialComponent = tx * normal[0] + ty * normal[1] + tz * normal[2]
+        tx -= normal[0] * radialComponent
+        ty -= normal[1] * radialComponent
+        tz -= normal[2] * radialComponent
+        val n = sqrt(tx * tx + ty * ty + tz * tz)
+        if (n < 1e-4f) {
+            return fallbackTangent(normal)
+        }
+        return floatArrayOf(tx / n, ty / n, tz / n)
+    }
+
+    private fun fallbackTangent(normal: FloatArray): FloatArray {
+        val ref = if (abs(normal[1]) < 0.95f) {
+            floatArrayOf(0f, 1f, 0f)
+        } else {
+            floatArrayOf(1f, 0f, 0f)
+        }
+        val tangent = cross(normal, ref)
+        normalizeVec3InPlace(tangent)
+        return tangent
+    }
+
+    private fun randomDirectionInCone(axis: FloatArray, maxConeDegrees: Float): FloatArray {
+        val axisNorm = floatArrayOf(axis[0], axis[1], axis[2])
+        normalizeVec3InPlace(axisNorm)
+        val ref = if (abs(axisNorm[1]) < 0.95f) {
+            floatArrayOf(0f, 1f, 0f)
+        } else {
+            floatArrayOf(1f, 0f, 0f)
+        }
+        val tangentA = cross(axisNorm, ref)
+        normalizeVec3InPlace(tangentA)
+        val tangentB = cross(tangentA, axisNorm)
+        normalizeVec3InPlace(tangentB)
+
+        val maxConeRadians = Math.toRadians(maxConeDegrees.toDouble()).toFloat()
+        val cosTheta = randomRange(cos(maxConeRadians), 1f)
+        val sinTheta = sqrt((1f - cosTheta * cosTheta).coerceAtLeast(0f))
+        val phi = randomRange(0f, 2f * Math.PI.toFloat())
+        val cosPhi = cos(phi)
+        val sinPhi = sin(phi)
+
+        val dir = floatArrayOf(
+            axisNorm[0] * cosTheta + (tangentA[0] * cosPhi + tangentB[0] * sinPhi) * sinTheta,
+            axisNorm[1] * cosTheta + (tangentA[1] * cosPhi + tangentB[1] * sinPhi) * sinTheta,
+            axisNorm[2] * cosTheta + (tangentA[2] * cosPhi + tangentB[2] * sinPhi) * sinTheta
+        )
+        normalizeVec3InPlace(dir)
+        return dir
+    }
+
+    private fun cross(a: FloatArray, b: FloatArray): FloatArray {
+        return floatArrayOf(
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0]
+        )
+    }
+
     private fun normalizeVec3InPlace(v: FloatArray) {
         val n = sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
         if (n < 1e-6f) {
@@ -913,6 +1128,48 @@ class CubeRenderer : GLSurfaceView.Renderer {
             delta < -maxDelta -> current - maxDelta
             else -> target
         }
+    }
+
+    private fun constrainPointToShell(rock: Rock) {
+        val norm = sqrt(rock.x * rock.x + rock.y * rock.y + rock.z * rock.z)
+        if (norm < 1e-4f) {
+            rock.x = 0f
+            rock.y = 0f
+            rock.z = -SHIP_DRAW_DISTANCE
+            return
+        }
+        val s = SHIP_DRAW_DISTANCE / norm
+        rock.x *= s
+        rock.y *= s
+        rock.z *= s
+    }
+
+    private fun constrainPointToShell(dot: GoldDot) {
+        val norm = sqrt(dot.x * dot.x + dot.y * dot.y + dot.z * dot.z)
+        if (norm < 1e-4f) {
+            dot.x = 0f
+            dot.y = 0f
+            dot.z = -SHIP_DRAW_DISTANCE
+            return
+        }
+        val s = SHIP_DRAW_DISTANCE / norm
+        dot.x *= s
+        dot.y *= s
+        dot.z *= s
+    }
+
+    private fun constrainPointToShell(laser: Laser) {
+        val norm = sqrt(laser.x * laser.x + laser.y * laser.y + laser.z * laser.z)
+        if (norm < 1e-4f) {
+            laser.x = 0f
+            laser.y = 0f
+            laser.z = -SHIP_DRAW_DISTANCE
+            return
+        }
+        val s = SHIP_DRAW_DISTANCE / norm
+        laser.x *= s
+        laser.y *= s
+        laser.z *= s
     }
 
     private fun projectionOnRay(
@@ -963,12 +1220,17 @@ class CubeRenderer : GLSurfaceView.Renderer {
         goldMissingSec = 0f
         alive = true
         gameOverSent = false
-        showGoldArrow = false
         shipHeadingDeg = 0f
         shipAimX = 0f
         shipAimY = 1f
         shipOffsetX = 0f
         shipOffsetY = 0f
+        shipWorldPos[0] = 0f
+        shipWorldPos[1] = 0f
+        shipWorldPos[2] = -SHIP_DRAW_DISTANCE
+        shipWorldDir[0] = 0f
+        shipWorldDir[1] = 0f
+        shipWorldDir[2] = -1f
         prevForwardInitialized = false
         pendingShots = 0
     }
@@ -1053,14 +1315,12 @@ class CubeRenderer : GLSurfaceView.Renderer {
         const val ICON_GOLD = 2
         const val ICON_DOT = 3
         const val ICON_BOMB = 4
-        const val ICON_ARROW = 5
-        const val ICON_LASER = 6
-        const val ICON_STAR = 7
-        const val ICON_COUNT = 8
+        const val ICON_LASER = 5
+        const val ICON_STAR = 6
+        const val ICON_COUNT = 7
         const val ICON_TEX_SIZE = 128
         val FORWARD_VECTOR = floatArrayOf(0f, 0f, -1f)
         const val GAZE_DISTANCE = 6f
-        const val SHIP_COLLISION_RADIUS = 0.62f
         const val SHIP_DRAW_DISTANCE = 1.5f
         const val FOV_Y_DEG = 60f
         const val RAD_TO_DEG = (180f / Math.PI.toFloat())
@@ -1074,8 +1334,6 @@ class CubeRenderer : GLSurfaceView.Renderer {
         const val LEVEL_DURATION_SEC = 18f
         const val GOLD_FORCE_RESPAWN_SEC = 1.35f
         const val GOLD_SPAWN_CHANCE_WHEN_MISSING = 0.35f
-        const val ARROW_EDGE_FACTOR = 0.76f
-        const val ARROW_SCREEN_MARGIN = 0.88f
         const val LASER_SPEED = 11.5f
         const val LASER_RADIUS = 0.2f
         const val LASER_OFFSCREEN_MARGIN = 1.15f
@@ -1088,22 +1346,37 @@ class CubeRenderer : GLSurfaceView.Renderer {
         const val SHIP_GAZE_OFFSET_GAIN = 0.95f
         const val SHIP_POSITION_FOLLOW_HZ = 2.4f
         const val SHIP_MAX_OFFSET_SPEED = 0.35f
-        const val BOMB_RENDER_SCALE = 2.6f
-        const val BIG_GOLD_RENDER_SCALE = 2.2f
-        const val GOLD_RENDER_SCALE = 2.0f
-        const val GOLD_DOT_RENDER_SCALE = 1.75f
-        const val BOMB_COLLISION_RADIUS_MULTIPLIER = 0.72f
-        const val ROCK_SHIP_COLLISION_RADIUS_MULTIPLIER = 0.24f
-        const val GOLD_COLLISION_RADIUS_MULTIPLIER = 0.72f
-        const val GOLD_SHIP_COLLISION_RADIUS_MULTIPLIER = 0.2f
-        const val GOLD_DOT_COLLISION_RADIUS_MULTIPLIER = 0.75f
-        const val GOLD_DOT_SHIP_COLLISION_RADIUS_MULTIPLIER = 0.16f
-        const val SHIP_RENDER_SCALE = 0.21f
+        const val BOMB_RENDER_SCALE = 0.96f
+        const val BIG_GOLD_RENDER_SCALE = 0.88f
+        const val GOLD_RENDER_SCALE = 0.92f
+        const val GOLD_DOT_RENDER_SCALE = 0.72f
+        const val SHIP_RENDER_SCALE = 0.16f
+        const val SPRITE_HALF_EXTENT = 0.5f
+        const val SHIP_TOUCH_TIGHTNESS = 0.78f
+        const val OBJECT_TOUCH_TIGHTNESS = 0.78f
+        const val ROCK_SPIN_PHASE_SCALE = 37f
+        const val ROCK_SPIN_SPEED_DEG = 38f
+        const val ROCK_TUMBLE_SPEED_DEG = 23f
+        const val DOT_SPIN_SPEED_DEG = 62f
+        const val DOT_TUMBLE_SPEED_DEG = 34f
         const val MAX_GOLD_DOTS = 34
         const val DOT_MIN_SPAWN_DISTANCE = 4.6f
         const val DOT_MAX_SPAWN_DISTANCE = 6.8f
+        const val DOT_DESPAWN_DISTANCE = 7.4f
         const val DOT_MIN_RADIUS = 0.05f
         const val DOT_MAX_RADIUS = 0.09f
+        const val SPAWN_MAX_ATTEMPTS = 18
+        const val MIN_SPAWN_DISTANCE_FROM_SHIP = 0.45f
+        const val OBJECT_SPAWN_CONE_DEGREES = 16f
+        const val DOT_SPAWN_CONE_DEGREES = 12f
+        const val OBJECT_APPROACH_CONE_DEGREES = 14f
+        const val DOT_APPROACH_CONE_DEGREES = 8f
+        const val OBJECT_APPROACH_SPEED_MIN = 0.07f
+        const val OBJECT_APPROACH_SPEED_MAX = 0.16f
+        const val GOLD_APPROACH_SPEED_MIN = 0.06f
+        const val GOLD_APPROACH_SPEED_MAX = 0.12f
+        const val DOT_APPROACH_SPEED_MIN = 0.06f
+        const val DOT_APPROACH_SPEED_MAX = 0.14f
         const val SMALL_GOLD_POINTS = 1
         const val BIG_GOLD_POINTS = 25
         const val PATH_SHOW_RADIUS = 1.25f

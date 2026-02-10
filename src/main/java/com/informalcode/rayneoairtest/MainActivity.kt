@@ -25,7 +25,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var hudText: TextView
     private lateinit var affirmationText: TextView
     private lateinit var gameOverText: TextView
-    private lateinit var recenterButton: Button
     private lateinit var restartButton: Button
     private lateinit var rayNeoSession: RayNeoSession
     private var bgmPlayer: MediaPlayer? = null
@@ -86,14 +85,6 @@ class MainActivity : AppCompatActivity() {
             visibility = View.GONE
         }
 
-        recenterButton = Button(this).apply {
-            text = "Recenter"
-            setOnClickListener {
-                renderer.recenter()
-                statusText.text = "Recentered"
-            }
-        }
-
         restartButton = Button(this).apply {
             text = "Restart"
             visibility = View.GONE
@@ -141,17 +132,6 @@ class MainActivity : AppCompatActivity() {
                     Gravity.TOP or Gravity.CENTER_HORIZONTAL
                 ).apply {
                     topMargin = 78
-                }
-            )
-            addView(
-                recenterButton,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    Gravity.TOP or Gravity.END
-                ).apply {
-                    topMargin = 20
-                    marginEnd = 20
                 }
             )
             addView(
