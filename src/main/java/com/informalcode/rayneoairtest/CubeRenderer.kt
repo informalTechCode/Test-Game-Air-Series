@@ -10,11 +10,58 @@ import java.nio.ShortBuffer
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import kotlin.math.atan2
+import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.max
+import kotlin.math.tan
 import kotlin.math.sin
 import kotlin.math.sqrt
+import kotlin.random.Random
 
 class CubeRenderer : GLSurfaceView.Renderer {
+
+    interface GameEventListener {
+        fun onHudChanged(score: Int, level: Int, isAlive: Boolean)
+        fun onGameOver(finalScore: Int)
+        fun onAffirmation(message: String)
+    }
+
+    private data class Rock(
+        var x: Float,
+        var y: Float,
+        var z: Float,
+        var vx: Float,
+        var vy: Float,
+        var vz: Float,
+        val radius: Float,
+        val isBomb: Boolean,
+        val isBigGold: Boolean
+    )
+
+    private data class Star(
+        val x: Float,
+        val y: Float,
+        val z: Float,
+        val size: Float,
+        val brightness: Float
+    )
+
+    private data class GoldDot(
+        var x: Float,
+        var y: Float,
+        var z: Float,
+        val radius: Float
+    )
+
+    private data class Laser(
+        var x: Float,
+        var y: Float,
+        var z: Float,
+        var vx: Float,
+        var vy: Float,
+        var vz: Float,
+        var lifeSec: Float
+    )
 
     private val vertices = floatArrayOf(
         -1f, -1f, -1f,
@@ -60,10 +107,53 @@ class CubeRenderer : GLSurfaceView.Renderer {
     private val orientation = floatArrayOf(1f, 0f, 0f, 0f) // w, x, y, z
     private val recenterReference = floatArrayOf(1f, 0f, 0f, 0f) // w, x, y, z
 
+    @Volatile
+    private var restartRequested = false
+    @Volatile
+    private var pendingShots = 0
+    @Volatile
+    private var gameEventListener: GameEventListener? = null
+
+    private val random = Random(System.currentTimeMillis())
+    private val rocks = mutableListOf<Rock>()
+    private val goldDots = mutableListOf<GoldDot>()
+    private val stars = mutableListOf<Star>()
+    private val lasers = mutableListOf<Laser>()
+
+    private var score = 0
+    private var elapsedSec = 0f
+    private var spawnTimerSec = 0.5f
+    private var goldMissingSec = 0f
+    private var alive = true
+    private var gameOverSent = false
+    private var lastFrameNs = 0L
+    private var aspectRatio = 1f
+    private var showGoldArrow = false
+    private var arrowPosX = 0f
+    private var arrowPosY = 0f
+    private var arrowAngleDeg = 0f
+    private var shipHeadingDeg = 0f
+    private var prevForwardInitialized = false
+    private val prevForward = FloatArray(3)
+    private var shipAimX = 0f
+    private var shipAimY = 1f
+
     private var program = 0
     private var posHandle = -1
     private var mvpHandle = -1
     private var colorHandle = -1
+
+    fun setGameEventListener(listener: GameEventListener?) {
+        gameEventListener = listener
+    }
+
+    fun restartGame() {
+        restartRequested = true
+    }
+
+    fun fireLaser() {
+        pendingShots = (pendingShots + 1).coerceAtMost(MAX_PENDING_SHOTS)
+    }
 
     fun setOrientation(wxyz: FloatArray) {
         if (wxyz.size < 4) {
@@ -109,23 +199,47 @@ class CubeRenderer : GLSurfaceView.Renderer {
         colorHandle = GLES20.glGetUniformLocation(program, "uColor")
 
         GLES20.glEnable(GLES20.GL_DEPTH_TEST)
-        GLES20.glClearColor(0.02f, 0.02f, 0.03f, 1f)
+        GLES20.glClearColor(0.01f, 0.01f, 0.06f, 1f)
+        if (stars.isEmpty()) {
+            repeat(STAR_COUNT) {
+                val dir = randomUnitVector()
+                val dist = randomRange(STAR_MIN_DISTANCE, STAR_MAX_DISTANCE)
+                stars.add(
+                    Star(
+                        x = dir[0] * dist,
+                        y = dir[1] * dist,
+                        z = dir[2] * dist,
+                        size = randomRange(0.03f, 0.08f),
+                        brightness = randomRange(0.55f, 1f)
+                    )
+                )
+            }
+        }
+        lastFrameNs = 0L
+        resetGame()
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
         GLES20.glViewport(0, 0, width, height)
         val aspect = if (height == 0) 1f else width.toFloat() / height.toFloat()
-        Matrix.perspectiveM(projection, 0, 60f, aspect, 0.1f, 100f)
-        Matrix.setLookAtM(
-            baseView,
-            0,
-            0f, 0f, 4f,
-            0f, 0f, 0f,
-            0f, 1f, 0f
-        )
+        aspectRatio = aspect
+        Matrix.perspectiveM(projection, 0, FOV_Y_DEG, aspect, 0.1f, 100f)
+        Matrix.setIdentityM(baseView, 0)
     }
 
     override fun onDrawFrame(gl: GL10?) {
+        if (restartRequested) {
+            resetGame()
+            restartRequested = false
+        }
+
+        val nowNs = System.nanoTime()
+        var dtSec = 0.016f
+        if (lastFrameNs > 0L) {
+            dtSec = ((nowNs - lastFrameNs).toFloat() * 1e-9f).coerceIn(0.001f, 0.05f)
+        }
+        lastFrameNs = nowNs
+
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
         GLES20.glUseProgram(program)
 
@@ -149,18 +263,27 @@ class CubeRenderer : GLSurfaceView.Renderer {
         quaternionToMatrix(qInv, headViewRot)
         Matrix.multiplyMM(view, 0, headViewRot, 0, baseView, 0)
 
-        Matrix.setIdentityM(model, 0)
-        Matrix.scaleM(model, 0, 0.8f, 0.8f, 0.8f)
+        if (alive) {
+            updateGame(dtSec, qRel)
+            updateGoldArrow(qRel)
+        } else {
+            showGoldArrow = false
+            shipHeadingDeg = 0f
+        }
 
-        Matrix.multiplyMM(viewModel, 0, view, 0, model, 0)
-        Matrix.multiplyMM(mvp, 0, projection, 0, viewModel, 0)
+        renderStars()
+        renderGoldDots()
+        renderRocks()
+        renderShip()
+        renderGoldArrow()
+        renderLasers()
 
-        GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvp, 0)
-        GLES20.glUniform4f(colorHandle, 0.2f, 0.85f, 0.95f, 1f)
-        GLES20.glEnableVertexAttribArray(posHandle)
-        GLES20.glVertexAttribPointer(posHandle, 3, GLES20.GL_FLOAT, false, 3 * 4, vertexBuffer)
-        GLES20.glDrawElements(GLES20.GL_TRIANGLES, indices.size, GLES20.GL_UNSIGNED_SHORT, indexBuffer)
-        GLES20.glDisableVertexAttribArray(posHandle)
+        val level = 1 + (elapsedSec / LEVEL_DURATION_SEC).toInt()
+        gameEventListener?.onHudChanged(score, level, alive)
+        if (!alive && !gameOverSent) {
+            gameOverSent = true
+            gameEventListener?.onGameOver(score)
+        }
     }
 
     private fun quaternionToMatrix(q: FloatArray, out: FloatArray) {
@@ -217,6 +340,438 @@ class CubeRenderer : GLSurfaceView.Renderer {
         return shaderId
     }
 
+    private fun updateGame(dtSec: Float, headQRel: FloatArray) {
+        elapsedSec += dtSec
+        updateShipTurn(headQRel, dtSec)
+        processPendingShots(headQRel)
+
+        val difficulty = 1f + elapsedSec / LEVEL_DURATION_SEC
+        val maxRocks = (8 + (difficulty * 4f).toInt()).coerceAtMost(30)
+        var hasBigGold = rocks.any { it.isBigGold }
+        goldMissingSec = if (hasBigGold) 0f else goldMissingSec + dtSec
+        spawnTimerSec -= dtSec
+        while (spawnTimerSec <= 0f && rocks.size < maxRocks) {
+            val spawnGold = !hasBigGold && (
+                goldMissingSec >= GOLD_FORCE_RESPAWN_SEC ||
+                    random.nextFloat() < GOLD_SPAWN_CHANCE_WHEN_MISSING
+                )
+            rocks.add(createRock(difficulty, spawnGold))
+            if (spawnGold) {
+                hasBigGold = true
+                goldMissingSec = 0f
+            }
+            spawnTimerSec += max(0.25f, 1.15f - 0.08f * difficulty)
+        }
+        fillGoldDots()
+
+        val forward = rotateVectorByQuat(headQRel, FORWARD_VECTOR)
+        val gazeX = forward[0] * GAZE_DISTANCE
+        val gazeY = forward[1] * GAZE_DISTANCE
+        val gazeZ = forward[2] * GAZE_DISTANCE
+
+        val iterator = rocks.iterator()
+        while (iterator.hasNext()) {
+            val rock = iterator.next()
+            rock.x += rock.vx * dtSec
+            rock.y += rock.vy * dtSec
+            rock.z += rock.vz * dtSec
+
+            val toCenter = sqrt(rock.x * rock.x + rock.y * rock.y + rock.z * rock.z)
+            if (toCenter > ROCK_DESPAWN_DISTANCE) {
+                iterator.remove()
+                continue
+            }
+
+            val dx = rock.x - gazeX
+            val dy = rock.y - gazeY
+            val dz = rock.z - gazeZ
+            val collisionDistance = rock.radius + SHIP_COLLISION_RADIUS
+            if (dx * dx + dy * dy + dz * dz <= collisionDistance * collisionDistance) {
+                if (rock.isBomb) {
+                    alive = false
+                    iterator.remove()
+                    break
+                } else {
+                    score += BIG_GOLD_POINTS
+                    gameEventListener?.onAffirmation(AFFIRMATIONS[random.nextInt(AFFIRMATIONS.size)])
+                    iterator.remove()
+                    hasBigGold = false
+                }
+            }
+        }
+        val dotIterator = goldDots.iterator()
+        while (dotIterator.hasNext()) {
+            val dot = dotIterator.next()
+            val dx = dot.x - gazeX
+            val dy = dot.y - gazeY
+            val dz = dot.z - gazeZ
+            val collectDistance = dot.radius + SHIP_COLLISION_RADIUS * 0.85f
+            if (dx * dx + dy * dy + dz * dz <= collectDistance * collectDistance) {
+                score += SMALL_GOLD_POINTS
+                dotIterator.remove()
+            }
+        }
+
+        updateLasers(dtSec)
+    }
+
+    private fun updateShipTurn(headQRel: FloatArray, dtSec: Float) {
+        val forward = rotateVectorByQuat(headQRel, FORWARD_VECTOR)
+        if (!prevForwardInitialized) {
+            prevForward[0] = forward[0]
+            prevForward[1] = forward[1]
+            prevForward[2] = forward[2]
+            prevForwardInitialized = true
+            return
+        }
+        val dx = forward[0] - prevForward[0]
+        val dy = forward[1] - prevForward[1]
+        prevForward[0] = forward[0]
+        prevForward[1] = forward[1]
+        prevForward[2] = forward[2]
+
+        var desiredX = dx
+        var desiredY = dy
+        val moveMag = sqrt(desiredX * desiredX + desiredY * desiredY)
+        if (moveMag < SHIP_TURN_DEADZONE) {
+            desiredX = 0f
+            desiredY = 1f
+        } else {
+            desiredX /= moveMag
+            desiredY /= moveMag
+        }
+
+        val follow = (dtSec * SHIP_TURN_FOLLOW_HZ).coerceIn(0f, 1f)
+        shipAimX += (desiredX - shipAimX) * follow
+        shipAimY += (desiredY - shipAimY) * follow
+
+        val aimMag = sqrt(shipAimX * shipAimX + shipAimY * shipAimY)
+        if (aimMag > 1e-4f) {
+            shipAimX /= aimMag
+            shipAimY /= aimMag
+        } else {
+            shipAimX = 0f
+            shipAimY = 1f
+        }
+        shipHeadingDeg = (atan2(shipAimY, shipAimX) * RAD_TO_DEG) - 90f
+    }
+
+    private fun processPendingShots(headQRel: FloatArray) {
+        if (pendingShots <= 0) {
+            return
+        }
+        val shots = pendingShots
+        pendingShots = 0
+        repeat(shots) {
+            val dirCamera = floatArrayOf(shipAimX * SHIP_AIM_LATERAL_GAIN, shipAimY * SHIP_AIM_LATERAL_GAIN, -1f)
+            normalizeVec3InPlace(dirCamera)
+            val forward = rotateVectorByQuat(headQRel, dirCamera)
+            val spawnDistance = SHIP_DRAW_DISTANCE + 0.9f
+            lasers.add(
+                Laser(
+                    x = forward[0] * spawnDistance,
+                    y = forward[1] * spawnDistance,
+                    z = forward[2] * spawnDistance,
+                    vx = forward[0] * LASER_SPEED,
+                    vy = forward[1] * LASER_SPEED,
+                    vz = forward[2] * LASER_SPEED,
+                    lifeSec = LASER_LIFE_SEC
+                )
+            )
+            if (lasers.size > MAX_LASERS) {
+                lasers.removeAt(0)
+            }
+        }
+    }
+
+    private fun updateLasers(dtSec: Float) {
+        val laserIter = lasers.iterator()
+        while (laserIter.hasNext()) {
+            val laser = laserIter.next()
+            laser.lifeSec -= dtSec
+            laser.x += laser.vx * dtSec
+            laser.y += laser.vy * dtSec
+            laser.z += laser.vz * dtSec
+            if (laser.lifeSec <= 0f) {
+                laserIter.remove()
+                continue
+            }
+
+            var destroyed = false
+            val rockIter = rocks.iterator()
+            while (rockIter.hasNext()) {
+                val rock = rockIter.next()
+                if (!rock.isBomb) {
+                    continue
+                }
+                val dx = laser.x - rock.x
+                val dy = laser.y - rock.y
+                val dz = laser.z - rock.z
+                val hitDistance = rock.radius + LASER_RADIUS
+                if (dx * dx + dy * dy + dz * dz <= hitDistance * hitDistance) {
+                    rockIter.remove()
+                    destroyed = true
+                    gameEventListener?.onAffirmation("Direct hit!")
+                    break
+                }
+            }
+            if (destroyed) {
+                laserIter.remove()
+            }
+        }
+    }
+
+    private fun updateGoldArrow(headQRel: FloatArray) {
+        val gold = rocks.firstOrNull { it.isBigGold } ?: run {
+            showGoldArrow = false
+            return
+        }
+        val cam = rotateVectorByQuat(conjugateQuat(headQRel), floatArrayOf(gold.x, gold.y, gold.z))
+        val x = cam[0]
+        val y = cam[1]
+        val z = cam[2]
+        val tanHalfFovY = tan(Math.toRadians((FOV_Y_DEG * 0.5f).toDouble())).toFloat()
+        val tanHalfFovX = tanHalfFovY * aspectRatio
+        val inFront = z < -0.2f
+        val nx = if (-z > 1e-4f) x / (-z) else 0f
+        val ny = if (-z > 1e-4f) y / (-z) else 0f
+        val onScreen = inFront &&
+            abs(nx) <= tanHalfFovX * ARROW_SCREEN_MARGIN &&
+            abs(ny) <= tanHalfFovY * ARROW_SCREEN_MARGIN
+        if (onScreen) {
+            showGoldArrow = false
+            return
+        }
+
+        var dirX = x
+        var dirY = y
+        if (!inFront) {
+            dirX = -dirX
+            dirY = -dirY
+        }
+        var norm = sqrt(dirX * dirX + dirY * dirY)
+        if (norm < 1e-3f) {
+            dirX = 0f
+            dirY = 1f
+            norm = 1f
+        }
+        dirX /= norm
+        dirY /= norm
+
+        val zPlane = -SHIP_DRAW_DISTANCE
+        val halfPlaneY = -zPlane * tanHalfFovY
+        val halfPlaneX = halfPlaneY * aspectRatio
+        arrowPosX = dirX * halfPlaneX * ARROW_EDGE_FACTOR
+        arrowPosY = dirY * halfPlaneY * ARROW_EDGE_FACTOR
+        arrowAngleDeg = (atan2(dirY, dirX) * RAD_TO_DEG) - 90f
+        showGoldArrow = true
+    }
+
+    private fun renderStars() {
+        val color = floatArrayOf(0.75f, 0.82f, 0.98f, 1f)
+        for (star in stars) {
+            Matrix.setIdentityM(model, 0)
+            Matrix.translateM(model, 0, star.x, star.y, star.z)
+            Matrix.scaleM(model, 0, star.size, star.size, star.size)
+            val brightness = star.brightness
+            color[0] = 0.45f * brightness + 0.35f
+            color[1] = 0.45f * brightness + 0.35f
+            color[2] = 0.70f * brightness + 0.20f
+            drawCube(view, color)
+        }
+    }
+
+    private fun renderRocks() {
+        for (rock in rocks) {
+            Matrix.setIdentityM(model, 0)
+            Matrix.translateM(model, 0, rock.x, rock.y, rock.z)
+            Matrix.scaleM(model, 0, rock.radius, rock.radius, rock.radius)
+            if (rock.isBomb) {
+                drawCube(view, BOMB_COLOR)
+            } else if (rock.isBigGold) {
+                drawCube(view, BIG_GOLD_COLOR)
+            } else {
+                drawCube(view, GOLD_COLOR)
+            }
+        }
+    }
+
+    private fun renderGoldDots() {
+        for (dot in goldDots) {
+            Matrix.setIdentityM(model, 0)
+            Matrix.translateM(model, 0, dot.x, dot.y, dot.z)
+            Matrix.scaleM(model, 0, dot.radius, dot.radius, dot.radius)
+            drawCube(view, DOT_GOLD_COLOR)
+        }
+    }
+
+    private fun renderShip() {
+        val shipBase = FloatArray(16)
+        Matrix.setIdentityM(model, 0)
+        Matrix.translateM(model, 0, 0f, 0f, -SHIP_DRAW_DISTANCE)
+        Matrix.rotateM(model, 0, shipHeadingDeg, 0f, 0f, 1f)
+        System.arraycopy(model, 0, shipBase, 0, 16)
+
+        Matrix.scaleM(model, 0, 0.16f, 0.16f, 0.28f)
+        drawCube(null, SHIP_COLOR)
+
+        System.arraycopy(shipBase, 0, model, 0, 16)
+        Matrix.translateM(model, 0, 0f, 0.17f, 0f)
+        Matrix.scaleM(model, 0, 0.09f, 0.12f, 0.19f)
+        drawCube(null, SHIP_NOSE_COLOR)
+    }
+
+    private fun renderGoldArrow() {
+        if (!showGoldArrow) {
+            return
+        }
+        val base = FloatArray(16)
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+
+        Matrix.setIdentityM(base, 0)
+        Matrix.translateM(base, 0, arrowPosX, arrowPosY, -SHIP_DRAW_DISTANCE)
+        Matrix.rotateM(base, 0, arrowAngleDeg, 0f, 0f, 1f)
+
+        System.arraycopy(base, 0, model, 0, 16)
+        Matrix.translateM(model, 0, 0f, -0.06f, 0f)
+        Matrix.scaleM(model, 0, 0.045f, 0.15f, 0.02f)
+        drawCube(null, ARROW_COLOR)
+
+        System.arraycopy(base, 0, model, 0, 16)
+        Matrix.translateM(model, 0, 0f, 0.07f, 0f)
+        Matrix.scaleM(model, 0, 0.11f, 0.085f, 0.02f)
+        drawCube(null, ARROW_COLOR)
+
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST)
+    }
+
+    private fun renderLasers() {
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+        for (laser in lasers) {
+            Matrix.setIdentityM(model, 0)
+            Matrix.translateM(model, 0, laser.x, laser.y, laser.z)
+            val dirLen = sqrt(laser.vx * laser.vx + laser.vy * laser.vy + laser.vz * laser.vz)
+            if (dirLen > 1e-4f) {
+                val nx = laser.vx / dirLen
+                val ny = laser.vy / dirLen
+                val nz = laser.vz / dirLen
+                val yaw = (atan2(nx, -nz) * RAD_TO_DEG)
+                val pitch = (atan2(ny, sqrt(nx * nx + nz * nz)) * RAD_TO_DEG)
+                Matrix.rotateM(model, 0, yaw, 0f, 1f, 0f)
+                Matrix.rotateM(model, 0, -pitch, 1f, 0f, 0f)
+            }
+            Matrix.scaleM(model, 0, 0.03f, 0.03f, 0.32f)
+            drawCube(view, LASER_COLOR)
+        }
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST)
+    }
+
+    private fun drawCube(viewMatrix: FloatArray?, color: FloatArray) {
+        if (viewMatrix != null) {
+            Matrix.multiplyMM(viewModel, 0, viewMatrix, 0, model, 0)
+        } else {
+            System.arraycopy(model, 0, viewModel, 0, 16)
+        }
+        Matrix.multiplyMM(mvp, 0, projection, 0, viewModel, 0)
+
+        GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvp, 0)
+        GLES20.glUniform4f(colorHandle, color[0], color[1], color[2], color[3])
+        GLES20.glEnableVertexAttribArray(posHandle)
+        GLES20.glVertexAttribPointer(posHandle, 3, GLES20.GL_FLOAT, false, 3 * 4, vertexBuffer)
+        GLES20.glDrawElements(GLES20.GL_TRIANGLES, indices.size, GLES20.GL_UNSIGNED_SHORT, indexBuffer)
+        GLES20.glDisableVertexAttribArray(posHandle)
+    }
+
+    private fun createRock(difficulty: Float, forceGold: Boolean): Rock {
+        val direction = randomUnitVector()
+        val spawnDistance = randomRange(OBJECT_MIN_SPAWN_DISTANCE, OBJECT_MAX_SPAWN_DISTANCE)
+        val speed = randomRange(0.05f, 0.16f + 0.02f * difficulty)
+        val velocityDir = randomUnitVector()
+        val bombChance = (0.22f + 0.04f * difficulty).coerceAtMost(0.68f)
+        val isBomb = if (forceGold) false else random.nextFloat() < bombChance
+        return Rock(
+            x = direction[0] * spawnDistance,
+            y = direction[1] * spawnDistance,
+            z = direction[2] * spawnDistance,
+            vx = velocityDir[0] * speed,
+            vy = velocityDir[1] * speed,
+            vz = velocityDir[2] * speed,
+            radius = randomRange(0.20f, 0.45f),
+            isBomb = isBomb,
+            isBigGold = forceGold
+        )
+    }
+
+    private fun fillGoldDots() {
+        while (goldDots.size < MAX_GOLD_DOTS) {
+            val direction = randomUnitVector()
+            val dist = randomRange(DOT_MIN_SPAWN_DISTANCE, DOT_MAX_SPAWN_DISTANCE)
+            goldDots.add(
+                GoldDot(
+                    x = direction[0] * dist,
+                    y = direction[1] * dist,
+                    z = direction[2] * dist,
+                    radius = randomRange(DOT_MIN_RADIUS, DOT_MAX_RADIUS)
+                )
+            )
+        }
+    }
+
+    private fun randomUnitVector(): FloatArray {
+        var x: Float
+        var y: Float
+        var z: Float
+        var norm: Float
+        do {
+            x = randomRange(-1f, 1f)
+            y = randomRange(-1f, 1f)
+            z = randomRange(-1f, 1f)
+            norm = sqrt(x * x + y * y + z * z)
+        } while (norm < 1e-3f)
+        return floatArrayOf(x / norm, y / norm, z / norm)
+    }
+
+    private fun randomRange(min: Float, max: Float): Float {
+        return min + (max - min) * random.nextFloat()
+    }
+
+    private fun rotateVectorByQuat(q: FloatArray, v: FloatArray): FloatArray {
+        val qv = floatArrayOf(0f, v[0], v[1], v[2])
+        val rotated = multiplyQuat(multiplyQuat(q, qv), conjugateQuat(q))
+        return floatArrayOf(rotated[1], rotated[2], rotated[3])
+    }
+
+    private fun normalizeVec3InPlace(v: FloatArray) {
+        val n = sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+        if (n < 1e-6f) {
+            v[0] = 0f
+            v[1] = 1f
+            v[2] = -1f
+            return
+        }
+        v[0] /= n
+        v[1] /= n
+        v[2] /= n
+    }
+
+    private fun resetGame() {
+        rocks.clear()
+        goldDots.clear()
+        lasers.clear()
+        score = 0
+        elapsedSec = 0f
+        spawnTimerSec = 0.35f
+        goldMissingSec = 0f
+        alive = true
+        gameOverSent = false
+        showGoldArrow = false
+        shipHeadingDeg = 0f
+        shipAimX = 0f
+        shipAimY = 1f
+        prevForwardInitialized = false
+        pendingShots = 0
+    }
+
     private fun conjugateQuat(q: FloatArray): FloatArray {
         return floatArrayOf(q[0], -q[1], -q[2], -q[3])
     }
@@ -251,6 +806,57 @@ class CubeRenderer : GLSurfaceView.Renderer {
     }
 
     private companion object {
+        val SHIP_COLOR = floatArrayOf(0.25f, 0.95f, 1f, 1f)
+        val SHIP_NOSE_COLOR = floatArrayOf(0.85f, 1f, 1f, 1f)
+        val GOLD_COLOR = floatArrayOf(0.96f, 0.78f, 0.16f, 1f)
+        val BIG_GOLD_COLOR = floatArrayOf(1f, 0.84f, 0.22f, 1f)
+        val DOT_GOLD_COLOR = floatArrayOf(1f, 0.92f, 0.5f, 1f)
+        val BOMB_COLOR = floatArrayOf(0.88f, 0.25f, 0.24f, 1f)
+        val ARROW_COLOR = floatArrayOf(1f, 0.93f, 0.34f, 1f)
+        val LASER_COLOR = floatArrayOf(0.25f, 1f, 0.35f, 1f)
+        val FORWARD_VECTOR = floatArrayOf(0f, 0f, -1f)
+        const val GAZE_DISTANCE = 6f
+        const val SHIP_COLLISION_RADIUS = 0.62f
+        const val SHIP_DRAW_DISTANCE = 1.5f
+        const val FOV_Y_DEG = 60f
+        const val RAD_TO_DEG = (180f / Math.PI.toFloat())
+        const val OBJECT_MIN_SPAWN_DISTANCE = 4.4f
+        const val OBJECT_MAX_SPAWN_DISTANCE = 6.6f
+        const val ROCK_DESPAWN_DISTANCE = 7.4f
+        const val STAR_COUNT = 180
+        const val STAR_MIN_DISTANCE = 25f
+        const val STAR_MAX_DISTANCE = 50f
+        const val LEVEL_DURATION_SEC = 18f
+        const val GOLD_FORCE_RESPAWN_SEC = 1.35f
+        const val GOLD_SPAWN_CHANCE_WHEN_MISSING = 0.35f
+        const val ARROW_EDGE_FACTOR = 0.76f
+        const val ARROW_SCREEN_MARGIN = 0.88f
+        const val LASER_SPEED = 11.5f
+        const val LASER_LIFE_SEC = 1.2f
+        const val LASER_RADIUS = 0.2f
+        const val MAX_LASERS = 16
+        const val MAX_PENDING_SHOTS = 3
+        const val SHIP_TURN_FOLLOW_HZ = 14f
+        const val SHIP_TURN_DEADZONE = 0.0028f
+        const val SHIP_AIM_LATERAL_GAIN = 0.85f
+        const val MAX_GOLD_DOTS = 34
+        const val DOT_MIN_SPAWN_DISTANCE = 4.6f
+        const val DOT_MAX_SPAWN_DISTANCE = 6.8f
+        const val DOT_MIN_RADIUS = 0.05f
+        const val DOT_MAX_RADIUS = 0.09f
+        const val SMALL_GOLD_POINTS = 1
+        const val BIG_GOLD_POINTS = 25
+        val AFFIRMATIONS = arrayOf(
+            "You did it!",
+            "Keep going!",
+            "Nice work!",
+            "Great focus!",
+            "On a roll!",
+            "Awesome!",
+            "You got this!",
+            "Strong run!"
+        )
+
         const val VERTEX_SHADER = """
             attribute vec3 aPosition;
             uniform mat4 uMvpMatrix;

@@ -356,7 +356,7 @@ class RayNeoSession(
     }
 
     private companion object {
-        const val ACTION_USB_PERMISSION = "com.informalcode.rayneoairtest.USB_PERMISSION"
+        const val ACTION_USB_PERMISSION = "com.informalcode.informalspacegame.USB_PERMISSION"
         const val SENSOR_WARMUP_DELAY_MS = 2000L
     }
 }

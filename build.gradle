@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace 'com.informalcode.rayneoairtest'
+    namespace 'com.informalcode.informalspacegame'
     compileSdk 35
 
     defaultConfig {
-        applicationId 'com.informalcode.rayneoairtest'
+        applicationId 'com.informalcode.informalspacegame'
         minSdk 26
         targetSdk 35
         versionCode 1

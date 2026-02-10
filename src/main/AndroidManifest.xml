@@ -10,7 +10,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.RayNeoTest">
         <activity
-            android:name=".MainActivity"
+            android:name="com.informalcode.rayneoairtest.MainActivity"
             android:exported="true"
             android:screenOrientation="sensorLandscape">
             <intent-filter>
