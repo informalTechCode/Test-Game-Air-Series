@@ -830,10 +830,7 @@ class CubeRenderer : GLSurfaceView.Renderer {
     }
 
     private fun createRock(difficulty: Float, forceGold: Boolean): Rock {
-        val direction = randomUnitVector()
-        val spawnDistance = randomRange(OBJECT_MIN_SPAWN_DISTANCE, OBJECT_MAX_SPAWN_DISTANCE)
         val speed = randomRange(0.05f, 0.16f + 0.02f * difficulty)
-        val velocityDir = randomUnitVector()
         val bombChance = (0.35f + 0.03f * difficulty).coerceAtMost(0.72f)
         val isBomb = if (forceGold) false else random.nextFloat() < bombChance
         val radius = if (isBomb) {
@@ -841,13 +838,21 @@ class CubeRenderer : GLSurfaceView.Renderer {
         } else {
             randomRange(0.22f, 0.42f)
         }
+
+        val spawn = randomPointOnCollectiblePlane(OBJECT_MIN_SPAWN_DISTANCE, OBJECT_MAX_SPAWN_DISTANCE)
+
+        val velocity = run {
+            val heading = randomRange(0f, (Math.PI * 2.0).toFloat())
+            floatArrayOf(cos(heading) * speed, 0f, sin(heading) * speed)
+        }
+
         return Rock(
-            x = direction[0] * spawnDistance,
-            y = direction[1] * spawnDistance,
-            z = direction[2] * spawnDistance,
-            vx = velocityDir[0] * speed,
-            vy = velocityDir[1] * speed,
-            vz = velocityDir[2] * speed,
+            x = spawn[0],
+            y = spawn[1],
+            z = spawn[2],
+            vx = velocity[0],
+            vy = velocity[1],
+            vz = velocity[2],
             radius = radius,
             isBomb = isBomb,
             isBigGold = forceGold
@@ -856,17 +861,26 @@ class CubeRenderer : GLSurfaceView.Renderer {
 
     private fun fillGoldDots() {
         while (goldDots.size < MAX_GOLD_DOTS) {
-            val direction = randomUnitVector()
-            val dist = randomRange(DOT_MIN_SPAWN_DISTANCE, DOT_MAX_SPAWN_DISTANCE)
+            val spawn = randomPointOnCollectiblePlane(DOT_MIN_SPAWN_DISTANCE, DOT_MAX_SPAWN_DISTANCE)
             goldDots.add(
                 GoldDot(
-                    x = direction[0] * dist,
-                    y = direction[1] * dist,
-                    z = direction[2] * dist,
+                    x = spawn[0],
+                    y = spawn[1],
+                    z = spawn[2],
                     radius = randomRange(DOT_MIN_RADIUS, DOT_MAX_RADIUS)
                 )
             )
         }
+    }
+
+    private fun randomPointOnCollectiblePlane(minDistance: Float, maxDistance: Float): FloatArray {
+        val distance = randomRange(minDistance, maxDistance)
+        val heading = randomRange(0f, (Math.PI * 2.0).toFloat())
+        return floatArrayOf(
+            cos(heading) * distance,
+            COLLECTIBLE_PLANE_Y,
+            sin(heading) * distance
+        )
     }
 
     private fun randomUnitVector(): FloatArray {
@@ -1104,6 +1118,7 @@ class CubeRenderer : GLSurfaceView.Renderer {
         const val DOT_MAX_SPAWN_DISTANCE = 6.8f
         const val DOT_MIN_RADIUS = 0.05f
         const val DOT_MAX_RADIUS = 0.09f
+        const val COLLECTIBLE_PLANE_Y = 0f
         const val SMALL_GOLD_POINTS = 1
         const val BIG_GOLD_POINTS = 25
         const val PATH_SHOW_RADIUS = 1.25f
