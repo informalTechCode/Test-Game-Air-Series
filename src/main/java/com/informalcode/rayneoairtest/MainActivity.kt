@@ -1,6 +1,7 @@
 package com.informalcode.rayneoairtest
 
 import android.graphics.Color
+import android.media.MediaPlayer
 import android.opengl.GLSurfaceView
 import android.os.Handler
 import android.os.Bundle
@@ -14,6 +15,7 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import com.informalcode.informalspacegame.R
 
 class MainActivity : AppCompatActivity() {
 
@@ -26,6 +28,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var recenterButton: Button
     private lateinit var restartButton: Button
     private lateinit var rayNeoSession: RayNeoSession
+    private var bgmPlayer: MediaPlayer? = null
+    private var isActivityVisible = false
+    private var isGameAlive = true
     private var shouldAutoRecenter = true
     private var autoRecenterAfterMs = 0L
     private val uiHandler = Handler(Looper.getMainLooper())
@@ -94,6 +99,8 @@ class MainActivity : AppCompatActivity() {
             visibility = View.GONE
             setOnClickListener {
                 renderer.restartGame()
+                isGameAlive = true
+                updateBackgroundMusicState()
                 gameOverText.visibility = View.GONE
                 visibility = View.GONE
             }
@@ -167,11 +174,14 @@ class MainActivity : AppCompatActivity() {
             )
         }
         setContentView(root)
+        initBackgroundMusic()
 
         renderer.setGameEventListener(
             object : CubeRenderer.GameEventListener {
                 override fun onHudChanged(score: Int, level: Int, isAlive: Boolean) {
                     runOnUiThread {
+                        isGameAlive = isAlive
+                        updateBackgroundMusicState()
                         hudText.text = "Score: $score  Level: $level"
                         if (isAlive) {
                             if (gameOverText.visibility != View.GONE) {
@@ -186,6 +196,8 @@ class MainActivity : AppCompatActivity() {
 
                 override fun onGameOver(finalScore: Int) {
                     runOnUiThread {
+                        isGameAlive = false
+                        updateBackgroundMusicState()
                         val leaderboard = addAndLoadTopScores(finalScore)
                         gameOverText.text = buildGameOverText(finalScore, leaderboard)
                         gameOverText.visibility = View.VISIBLE
@@ -219,17 +231,46 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        isActivityVisible = true
         shouldAutoRecenter = true
         autoRecenterAfterMs = SystemClock.elapsedRealtime() + AUTO_RECENTER_DELAY_MS
         glView.onResume()
         rayNeoSession.start()
+        updateBackgroundMusicState()
     }
 
     override fun onPause() {
+        isActivityVisible = false
+        updateBackgroundMusicState()
         rayNeoSession.stop()
         uiHandler.removeCallbacks(clearAffirmationRunnable)
         glView.onPause()
         super.onPause()
+    }
+
+    override fun onDestroy() {
+        bgmPlayer?.release()
+        bgmPlayer = null
+        super.onDestroy()
+    }
+
+    private fun initBackgroundMusic() {
+        bgmPlayer = MediaPlayer.create(this, R.raw.last_fortress_rising)?.apply {
+            isLooping = true
+            setVolume(BGM_VOLUME, BGM_VOLUME)
+        }
+    }
+
+    private fun updateBackgroundMusicState() {
+        val player = bgmPlayer ?: return
+        val shouldPlay = isActivityVisible && isGameAlive
+        if (shouldPlay) {
+            if (!player.isPlaying) {
+                player.start()
+            }
+        } else if (player.isPlaying) {
+            player.pause()
+        }
     }
 
     private companion object {
@@ -237,6 +278,7 @@ class MainActivity : AppCompatActivity() {
         const val PREFS_NAME = "game_scores"
         const val SCORES_KEY = "best_scores_csv"
         const val MAX_LEADERBOARD_ENTRIES = 8
+        const val BGM_VOLUME = 0.14f
     }
 
     private fun addAndLoadTopScores(newScore: Int): List<Int> {
